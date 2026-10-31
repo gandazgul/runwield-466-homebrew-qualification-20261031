@@ -1,0 +1,76 @@
+name: Homebrew issue 466 qualification
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    name: macOS ${{ matrix.mode }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [stable, candidate, repair]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: RunWield/runwield
+          ref: 1f78710b1e8bed0c19d8242bf20a5b7078d17c02
+          path: source
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: RunWield/homebrew-tap
+          ref: bbc7d4b649aff76e447b6ec61f42a3b106c92bf5
+          path: tap-base
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - name: Install locked source dependencies
+        working-directory: source
+        run: bun run install:locked
+      - name: Prepare exact narrow repair and verify assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 qualify.py prepare
+      - name: Download Candidate bytes without publishing output
+        if: matrix.mode == 'candidate'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir candidate-assets
+          gh run download 41240578978 --repo RunWield/runwield --name release-upload --dir candidate-assets
+          test -f candidate-assets/wld-v0.14.4-rc.1-darwin-arm64.tar.gz
+          test -f candidate-assets/wld-v0.14.4-rc.1-darwin-x64.tar.gz
+      - name: Prepare hosted Homebrew environment
+        run: |
+          set -euo pipefail
+          brew update
+          brew tap 1broseidon/tap
+          brew trust --formula 1broseidon/tap/cymbal
+          prefix=$(brew --prefix)
+          if [[ -L "$prefix/bin/openssl" && "$(readlink "$prefix/bin/openssl")" == "$prefix/opt/openssl@1.1/bin/openssl" ]]; then
+            unlink "$prefix/bin/openssl"
+          fi
+      - name: Qualify isolated package lifecycle
+        env:
+          MODE: ${{ matrix.mode }}
+        run: bash qualify.sh
+      - name: Verify preservation and write evidence
+        env:
+          MODE: ${{ matrix.mode }}
+        run: python3 qualify.py verify
+      - name: Retain qualification evidence only
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: evidence-${{ matrix.mode }}
+          path: evidence/
+          if-no-files-found: warn
